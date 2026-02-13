@@ -7,7 +7,17 @@ from typing import Optional
 
 import numpy as np
 
-AVAILABLE_DATASETS = ("toy", "mnist", "digits", "iris", "wine", "breast_cancer")
+AVAILABLE_DATASETS = (
+    "toy",
+    "mnist",
+    "digits",
+    "iris",
+    "wine",
+    "breast_cancer",
+    "covtype",
+    "kddcup99_10p",
+    "kddcup99_full",
+)
 
 MNIST_FILES = {
     "train_images": "train-images-idx3-ubyte.gz",
@@ -76,6 +86,32 @@ def _subsample_xy(
     return X[idx], y[idx]
 
 
+def _encode_labels(y: np.ndarray) -> np.ndarray:
+    y = np.asarray(y)
+    if np.issubdtype(y.dtype, np.number):
+        y_num = y.astype(np.int64, copy=False)
+        if y_num.min() == 0 and y_num.max() == (np.unique(y_num).size - 1):
+            return y_num
+    _, inv = np.unique(y, return_inverse=True)
+    return inv.astype(np.int64, copy=False)
+
+
+def _mixed_to_float_codes(X: np.ndarray) -> np.ndarray:
+    X = np.asarray(X)
+    if X.dtype != object:
+        return X.astype(np.float32, copy=False)
+    out = np.empty(X.shape, dtype=np.float32)
+    for j in range(X.shape[1]):
+        col = X[:, j]
+        sample = col[0]
+        if isinstance(sample, (bytes, str, np.bytes_)):
+            _, inv = np.unique(col, return_inverse=True)
+            out[:, j] = inv.astype(np.float32, copy=False)
+        else:
+            out[:, j] = col.astype(np.float32, copy=False)
+    return out
+
+
 def load_mnist(data_dir: str, n_train: int, n_test: int, seed: int):
     ensure_mnist(data_dir)
     Xtr = _read_idx_images(os.path.join(data_dir, MNIST_FILES["train_images"]))
@@ -94,10 +130,11 @@ def load_sklearn_dataset(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     try:
         from sklearn import datasets as sk_datasets  # type: ignore
+        from sklearn.datasets import fetch_kddcup99  # type: ignore
         from sklearn.model_selection import train_test_split  # type: ignore
     except ImportError as exc:
         raise RuntimeError(
-            "scikit-learn is required for datasets: digits/iris/wine/breast_cancer"
+            "scikit-learn is required for datasets: digits/iris/wine/breast_cancer/covtype/kddcup99"
         ) from exc
 
     if name == "digits":
@@ -108,11 +145,51 @@ def load_sklearn_dataset(
         data = sk_datasets.load_wine()
     elif name == "breast_cancer":
         data = sk_datasets.load_breast_cancer()
+    elif name == "covtype":
+        X, y = sk_datasets.fetch_covtype(return_X_y=True)
+        X = X.astype(np.float32, copy=False)
+        # Covertype labels are 1..7; convert to 0..6.
+        y = (y.astype(np.int64, copy=False) - 1).astype(np.int64, copy=False)
+        n = X.shape[0]
+        rng = np.random.default_rng(seed)
+
+        # If explicit sizes fit in the full dataset, sample directly so 500k+ train is possible.
+        if n_train > 0 and n_test > 0 and (n_train + n_test) <= n:
+            perm = rng.permutation(n)
+            tr_idx = perm[:n_train]
+            te_idx = perm[n_train : n_train + n_test]
+            return X[tr_idx], y[tr_idx], X[te_idx], y[te_idx]
+
+        # Fallback split if explicit sizes are not feasible.
+        Xtr, Xte, ytr, yte = train_test_split(
+            X, y, test_size=0.2, random_state=seed, stratify=y
+        )
+        Xtr, ytr = _subsample_xy(Xtr, ytr, n_train, rng)
+        Xte, yte = _subsample_xy(Xte, yte, n_test, rng)
+        return Xtr, ytr, Xte, yte
+    elif name in ("kddcup99_10p", "kddcup99_full"):
+        percent10 = name == "kddcup99_10p"
+        data = fetch_kddcup99(percent10=percent10, return_X_y=False, as_frame=False)
+        X = _mixed_to_float_codes(data.data)
+        y = _encode_labels(data.target)
+        n = X.shape[0]
+        rng = np.random.default_rng(seed)
+        if n_train > 0 and n_test > 0 and (n_train + n_test) <= n:
+            perm = rng.permutation(n)
+            tr_idx = perm[:n_train]
+            te_idx = perm[n_train : n_train + n_test]
+            return X[tr_idx], y[tr_idx], X[te_idx], y[te_idx]
+        Xtr, Xte, ytr, yte = train_test_split(
+            X, y, test_size=0.2, random_state=seed, stratify=y
+        )
+        Xtr, ytr = _subsample_xy(Xtr, ytr, n_train, rng)
+        Xte, yte = _subsample_xy(Xte, yte, n_test, rng)
+        return Xtr, ytr, Xte, yte
     else:
         raise ValueError(f"unknown sklearn dataset: {name}")
 
     X = data.data.astype(np.float32, copy=False)
-    y = data.target.astype(np.int64, copy=False)
+    y = _encode_labels(data.target)
     Xtr, Xte, ytr, yte = train_test_split(
         X, y, test_size=0.25, random_state=seed, stratify=y
     )

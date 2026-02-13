@@ -50,11 +50,19 @@ class HistogramDecisionTreeClassifier:
             return d
         raise ValueError("max_features must be int, 'sqrt', or 'all'")
 
-    def fit(self, Xb: np.ndarray, y: np.ndarray) -> "HistogramDecisionTreeClassifier":
+    def fit(
+        self, Xb: np.ndarray, y: np.ndarray, n_classes: Optional[int] = None
+    ) -> "HistogramDecisionTreeClassifier":
         Xb = np.asarray(Xb, dtype=np.uint8)
         y = np.asarray(y, dtype=np.int64)
         self.rng_ = np.random.default_rng(self.random_state)
-        self.n_classes_ = int(np.max(y)) + 1
+        inferred_n_classes = int(np.max(y)) + 1
+        if n_classes is None:
+            self.n_classes_ = inferred_n_classes
+        else:
+            if int(n_classes) < inferred_n_classes:
+                raise ValueError("n_classes must be >= max(y)+1 for tree training")
+            self.n_classes_ = int(n_classes)
         self.root_ = self._build(Xb, y, depth=0)
         return self
 
@@ -173,7 +181,7 @@ class HistogramRandomForestClassifier:
                 min_impurity_decrease=self.min_impurity_decrease,
                 random_state=int(rng.integers(0, 2**31 - 1)),
             )
-            tree.fit(Xb[idx], y[idx])
+            tree.fit(Xb[idx], y[idx], n_classes=self.n_classes_)
             self.insertions_ += splitter.insertions_
             self.trees_.append(tree)
         return self

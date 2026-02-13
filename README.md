@@ -1,13 +1,14 @@
 # Minimal FastForest-Style RF
 
-Minimal implementation of a FastForest/MABSplit-style Random Forest.
+Minimal implementation of a FastForest/MABSplit-style Random Forest with
+multi-run experiment logging to CSV.
 
 - Random Forest only
 - Histogram splits
 - `exact` vs `mab` split search
 - Profile presets for runtime/accuracy tradeoff
 - Required dependency: `numpy`
-- Optional dependency (for extra datasets): `scikit-learn`
+- Optional dependency (for real tabular datasets): `scikit-learn`
 
 Code is split into small modules:
 - `mfrf/datasets.py`
@@ -39,9 +40,38 @@ This runs on a synthetic dataset by default and prints:
 - histogram insertions (sample complexity proxy)
 - test accuracy
 - speedup summary (`exact` vs `mab`)
+- CSV file (`result.csv` by default)
 
-The script prints `engine: mfrf-v2` at startup so you can confirm you are using the new implementation.
+The script prints `engine: mfrf-v3` at startup so you can confirm you are using the new implementation.
 MAB defaults now use paper-style early stopping (`consume_all_data=False`) to improve insertion reduction.
+
+## CSV Experiments (multi-run averages)
+
+Run multiple seeds and save summary rows:
+
+```bash
+python3 minimal_fastforest_rf.py \
+  --dataset mnist \
+  --profile balanced \
+  --mode both \
+  --runs 5 \
+  --results_csv mnist_runs.csv
+```
+
+CSV contains:
+- one compact row per dataset-size/config with mean/std over runs
+- no duplicate benchmark/mab rows; exact and mab are side-by-side columns
+
+Key comparison columns:
+- `time_speedup_exact_over_mab` (ratio, >1 means MAB faster)
+- `runtime_reduction_pct` (percent runtime reduction for MAB vs exact)
+- `insertion_reduction_pct` (percent insertion reduction for MAB vs exact)
+
+Useful flags:
+- `--runs`: number of runs per dataset
+- `--seed` and `--seed_stride`: seed schedule
+- `--results_csv`: output CSV path
+- `--append_results`: append to existing CSV
 
 ## Profiles
 
@@ -107,24 +137,58 @@ python3 minimal_fastforest_rf.py \
 
 If you want conservative behavior closer to full-data MAB evaluation, add `--consume_all_data`.
 
-## MAB-only training (no baseline)
-
-```bash
-python3 minimal_fastforest_rf.py --mode mab --quick
-```
-
-## Different datasets
+## Dataset selection options
 
 Single dataset:
 
 ```bash
-python3 minimal_fastforest_rf.py --dataset digits --quick --mode both
+python3 minimal_fastforest_rf.py --dataset mnist --quick --mode both
 ```
 
-Multiple datasets in one run:
+Multiple datasets:
 
 ```bash
 python3 minimal_fastforest_rf.py --datasets mnist,digits,wine --quick --mode both
+```
+
+Dataset specs with explicit sizes:
+
+```bash
+python3 minimal_fastforest_rf.py \
+  --dataset_specs "mnist:12000:2000:balanced;digits:1300:400:quick;covtype:500000:80000:custom" \
+  --runs 3 \
+  --mode both \
+  --results_csv mixed_specs.csv
+```
+
+Predefined groups:
+
+```bash
+python3 minimal_fastforest_rf.py --dataset_group small --runs 5 --mode both
+python3 minimal_fastforest_rf.py --dataset_group medium --runs 3 --mode both
+python3 minimal_fastforest_rf.py --dataset_group big --runs 2 --mode both
+python3 minimal_fastforest_rf.py --dataset_group small_big --runs 5 --mode both
+python3 minimal_fastforest_rf.py --dataset_group all --runs 2 --mode both
+```
+
+Run all configured datasets with 5 seeds and save to the default output file:
+
+```bash
+python3 minimal_fastforest_rf.py --dataset_group all --runs 5 --mode both
+```
+
+`big` uses real large datasets:
+- `covtype` (500k train / 80k test)
+- `kddcup99_10p` (400k train / 80k test)
+- `kddcup99_full` (900k train / 100k test)
+
+`small_big` mixes the small tabular datasets with these big datasets in one run.
+For large datasets, explicit `n_train + n_test` sizes are sampled directly from the full dataset when feasible.
+
+## MAB-only training
+
+```bash
+python3 minimal_fastforest_rf.py --mode mab --quick
 ```
 
 Available dataset names:
@@ -134,3 +198,6 @@ Available dataset names:
 - `iris`
 - `wine`
 - `breast_cancer`
+- `covtype`
+- `kddcup99_10p`
+- `kddcup99_full`
