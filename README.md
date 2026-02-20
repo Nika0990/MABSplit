@@ -1,53 +1,64 @@
 # Minimal FastForest-Style RF
 
-Minimal implementation of a FastForest/MABSplit-style Random Forest with
-multi-run experiment logging to CSV.
+Minimal implementation of a FastForest/MABSplit-style Random Forest benchmark with CSV experiment logging.
 
-- Random Forest only
-- Histogram splits
-- `exact` vs `mab` split search
-- Profile presets for runtime/accuracy tradeoff
-- Required dependency: `numpy`
-- Optional dependency (for real tabular datasets): `scikit-learn`
+Last verified: 2026-02-20.
 
-Code is split into small modules:
-- `mfrf/datasets.py`
-- `mfrf/preprocess.py`
-- `mfrf/splitters.py`
-- `mfrf/models.py`
-- `minimal_fastforest_rf.py` (CLI)
+## What this project does
+
+- Trains histogram-based Random Forest models.
+- Compares `exact` split search vs `mab` split search.
+- Supports fast/quality profiles for runtime vs accuracy tradeoffs.
+- Writes aggregated benchmark summaries to CSV.
+
+Main files:
+- `minimal_fastforest_rf.py` (CLI entrypoint)
+- `mfrf/datasets.py` (dataset loading)
+- `mfrf/preprocess.py` (feature selection + binning)
+- `mfrf/splitters.py` (exact and MAB splitters)
+- `mfrf/models.py` (tree + forest models)
+
+## Requirements
+
+- Python 3.10+ (tested with modern Python 3).
+- Required package: `numpy`.
+- Optional package: `scikit-learn` (needed for `digits`, `iris`, `wine`, `breast_cancer`, `covtype`, `aps_failure`, `kddcup99_*` datasets).
 
 ## Setup
 
 ```bash
-python3 -m pip install numpy
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install --upgrade pip
+python3 -m pip install -r requirements.txt
+python3 -m pip install scikit-learn  # optional, for non-MNIST real datasets
 ```
 
-Optional:
+## Run the code
+
+### 1) Quick smoke test (recommended first run)
 
 ```bash
-python3 -m pip install scikit-learn
+python3 minimal_fastforest_rf.py --dataset toy --quick --mode both
 ```
 
-## Quick run (fast)
-
-```bash
-python3 minimal_fastforest_rf.py --quick --mode both
-```
-
-This runs on a synthetic dataset by default and prints:
+This should print:
+- `engine: mfrf-v3`
 - train time
-- histogram insertions (sample complexity proxy)
+- insertion counts
 - test accuracy
-- speedup summary (`exact` vs `mab`)
-- CSV file (`result.csv` by default)
+- speedup summary for exact vs MAB
+- `results_csv_written: result.csv (...)`
 
-The script prints `engine: mfrf-v3` at startup so you can confirm you are using the new implementation.
-MAB defaults now use paper-style early stopping (`consume_all_data=False`) to improve insertion reduction.
+### 2) MNIST benchmark
 
-## CSV Experiments (multi-run averages)
+```bash
+python3 minimal_fastforest_rf.py --dataset mnist --profile balanced --mode both
+```
 
-Run multiple seeds and save summary rows:
+If MNIST files are missing, the script tries to download them into `mnist/`.
+
+### 3) Multi-run CSV experiment
 
 ```bash
 python3 minimal_fastforest_rf.py \
@@ -58,86 +69,24 @@ python3 minimal_fastforest_rf.py \
   --results_csv mnist_runs.csv
 ```
 
-CSV contains:
-- one compact row per dataset-size/config with mean/std over runs
-- no duplicate benchmark/mab rows; exact and mab are side-by-side columns
+CSV includes one aggregated row per configuration with mean/std columns.
 
-Key comparison columns:
-- `time_speedup_exact_over_mab` (ratio, >1 means MAB faster)
-- `runtime_reduction_pct` (percent runtime reduction for MAB vs exact)
-- `insertion_reduction_pct` (percent insertion reduction for MAB vs exact)
+## Important CLI options
 
-Useful flags:
-- `--runs`: number of runs per dataset
-- `--seed` and `--seed_stride`: seed schedule
-- `--results_csv`: output CSV path
-- `--append_results`: append to existing CSV
+- `--mode {both,mab,exact}`: choose which model(s) to run.
+- `--profile {quick,balanced,quality,custom}`: apply preset runtime/accuracy configs.
+- `--runs N`: run multiple seeds and aggregate.
+- `--seed` and `--seed_stride`: control deterministic seed schedule.
+- `--results_csv PATH`: output summary CSV path.
+- `--append_results`: append rows instead of overwrite.
 
-## Profiles
-
-- `quick`: fastest, smallest sample sizes
-- `balanced`: better accuracy with moderate runtime
-- `quality`: strongest results, longer runtime
-- `custom`: use exactly your CLI params
-
-Examples:
+Show all options:
 
 ```bash
-python3 minimal_fastforest_rf.py --dataset mnist --profile balanced --mode both
-python3 minimal_fastforest_rf.py --dataset mnist --profile quality --mode mab
+python3 minimal_fastforest_rf.py --help
 ```
 
-## MNIST run
-
-```bash
-python3 minimal_fastforest_rf.py --dataset mnist --quick --mode both
-```
-
-If MNIST files are missing, the script tries to download them into `mnist/`.
-If download is unavailable, it automatically falls back to toy data.
-
-## Better MNIST Accuracy
-
-```bash
-python3 minimal_fastforest_rf.py \
-  --dataset mnist \
-  --profile balanced \
-  --mode both
-```
-
-Higher-quality MAB-only run:
-
-```bash
-python3 minimal_fastforest_rf.py \
-  --dataset mnist \
-  --profile quality \
-  --mode mab \
-  --n_test 2000
-```
-
-Typical outcomes (same machine, seed=0):
-- `quick` (6k train): ~`0.87-0.88` accuracy, ~3s/model.
-- `balanced` (12k train): ~`0.92-0.93` accuracy, ~13s/model.
-- `quality` (30k train): ~`0.94-0.95` accuracy, longer runtime.
-
-## Strict benchmark parity
-
-To compare exact vs MAB with the same model/data setup (difference only in split-selection), run:
-
-```bash
-python3 minimal_fastforest_rf.py \
-  --dataset mnist \
-  --profile custom \
-  --mode both \
-  --n_train 12000 --n_test 2000 \
-  --n_estimators 12 --max_depth 12 \
-  --num_bins 64 --max_features sqrt \
-  --feature_var_threshold 0.0
-```
-
-If you want conservative behavior closer to full-data MAB evaluation, add `--consume_all_data`.
-
-## Dataset selection options
+## Dataset selection
 
 Single dataset:
 
@@ -151,53 +100,35 @@ Multiple datasets:
 python3 minimal_fastforest_rf.py --datasets mnist,digits,wine --quick --mode both
 ```
 
-Dataset specs with explicit sizes:
+Explicit dataset specs:
 
 ```bash
 python3 minimal_fastforest_rf.py \
-  --dataset_specs "mnist:12000:2000:balanced;digits:1300:400:quick;covtype:500000:80000:custom" \
+  --dataset_specs "mnist:12000:2000:balanced;digits:1300:400:quick" \
   --runs 3 \
   --mode both \
   --results_csv mixed_specs.csv
 ```
 
-Predefined groups:
+Dataset groups:
 
 ```bash
 python3 minimal_fastforest_rf.py --dataset_group small --runs 5 --mode both
 python3 minimal_fastforest_rf.py --dataset_group medium --runs 3 --mode both
 python3 minimal_fastforest_rf.py --dataset_group big --runs 2 --mode both
-python3 minimal_fastforest_rf.py --dataset_group small_big --runs 5 --mode both
 python3 minimal_fastforest_rf.py --dataset_group all --runs 2 --mode both
 ```
 
-Run all configured datasets with 5 seeds and save to the default output file:
+APS Failure (OpenML) example:
 
 ```bash
-python3 minimal_fastforest_rf.py --dataset_group all --runs 5 --mode both
+python3 minimal_fastforest_rf.py --dataset aps_failure --profile quick --mode both
 ```
 
-`big` uses real large datasets:
-- `covtype` (500k train / 80k test)
-- `kddcup99_10p` (400k train / 80k test)
-- `kddcup99_full` (900k train / 100k test)
+`aps_failure` is fetched from OpenML on first use and requires network access.
 
-`small_big` mixes the small tabular datasets with these big datasets in one run.
-For large datasets, explicit `n_train + n_test` sizes are sampled directly from the full dataset when feasible.
+## Reproducibility notes
 
-## MAB-only training
-
-```bash
-python3 minimal_fastforest_rf.py --mode mab --quick
-```
-
-Available dataset names:
-- `toy`
-- `mnist`
-- `digits`
-- `iris`
-- `wine`
-- `breast_cancer`
-- `covtype`
-- `kddcup99_10p`
-- `kddcup99_full`
+- Exact and MAB use identical data/model settings; only split strategy differs.
+- `time_speedup_exact_over_mab > 1` means MAB is faster.
+- Add `--consume_all_data` to disable MAB early stopping.

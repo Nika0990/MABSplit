@@ -1,9 +1,14 @@
 """
 Minimal FastForest-style Random Forest benchmark + CSV experiment runner.
 
-Core behavior:
-- Exact and MABSplit share identical model/data settings.
-- MABSplit differs only in split-selection routine.
+This CLI compares two split-selection strategies under identical model and
+dataset settings:
+- `exact`: evaluates splits using full histogram statistics.
+- `mab`: uses an MAB-style early-stopping strategy to reduce work.
+
+Typical usage:
+    python3 minimal_fastforest_rf.py --dataset toy --quick --mode both
+    python3 minimal_fastforest_rf.py --dataset mnist --profile balanced --mode both
 """
 
 from __future__ import annotations
@@ -65,12 +70,20 @@ CSV_FIELDS = [
 
 
 def accuracy(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """Return classification accuracy for integer-encoded labels."""
     return float(np.mean(y_true == y_pred))
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser()
-    p.add_argument("--dataset", choices=AVAILABLE_DATASETS, default="toy")
+    """Parse CLI arguments for dataset selection, model config, and output."""
+    p = argparse.ArgumentParser(
+        description=(
+            "Benchmark exact vs MABSplit histogram random forests and optionally "
+            "write aggregated multi-run results to CSV."
+        ),
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    p.add_argument("--dataset", choices=AVAILABLE_DATASETS, default="toy", help="Single dataset to run.")
     p.add_argument(
         "--datasets",
         type=str,
@@ -89,48 +102,128 @@ def parse_args() -> argparse.Namespace:
         default="none",
         help="Predefined real-dataset groups with reasonable sizes.",
     )
-    p.add_argument("--data_dir", type=str, default="mnist")
-    p.add_argument("--mode", choices=["both", "mab", "exact"], default="both")
+    p.add_argument("--data_dir", type=str, default="mnist", help="Directory for MNIST files.")
+    p.add_argument(
+        "--mode",
+        choices=["both", "mab", "exact"],
+        default="both",
+        help="Which training mode(s) to run for each dataset.",
+    )
 
     p.add_argument(
         "--profile",
         choices=["quick", "balanced", "quality", "custom"],
         default="quick",
+        help="Preset controlling sample sizes and model defaults.",
     )
     p.add_argument("--quick", action="store_true", help="Alias for --profile quick")
 
-    p.add_argument("--n_train", type=int, default=6000)
-    p.add_argument("--n_test", type=int, default=2000)
-    p.add_argument("--toy_features", type=int, default=64)
-    p.add_argument("--toy_classes", type=int, default=10)
+    p.add_argument("--n_train", type=int, default=6000, help="Requested train sample size.")
+    p.add_argument("--n_test", type=int, default=2000, help="Requested test sample size.")
+    p.add_argument(
+        "--toy_features",
+        type=int,
+        default=64,
+        help="Feature count for synthetic toy data.",
+    )
+    p.add_argument(
+        "--toy_classes",
+        type=int,
+        default=10,
+        help="Class count for synthetic toy data.",
+    )
 
-    p.add_argument("--n_estimators", type=int, default=6)
-    p.add_argument("--max_depth", type=int, default=10)
-    p.add_argument("--min_samples_split", type=int, default=2)
-    p.add_argument("--min_samples_leaf", type=int, default=1)
-    p.add_argument("--max_features", type=str, default="auto")
-    p.add_argument("--min_impurity_decrease", type=float, default=0.0)
+    p.add_argument("--n_estimators", type=int, default=6, help="Number of trees in the forest.")
+    p.add_argument("--max_depth", type=int, default=10, help="Maximum depth per tree.")
+    p.add_argument(
+        "--min_samples_split",
+        type=int,
+        default=2,
+        help="Minimum samples required to attempt a split.",
+    )
+    p.add_argument(
+        "--min_samples_leaf",
+        type=int,
+        default=1,
+        help="Minimum samples allowed in each child after split.",
+    )
+    p.add_argument(
+        "--max_features",
+        type=str,
+        default="auto",
+        help="Feature subsampling rule: auto, all, sqrt, or an integer.",
+    )
+    p.add_argument(
+        "--min_impurity_decrease",
+        type=float,
+        default=0.0,
+        help="Minimum impurity decrease to accept a split.",
+    )
 
-    p.add_argument("--num_bins", type=int, default=48)
-    p.add_argument("--batch_size", type=int, default=512)
-    p.add_argument("--mab_min_samples", type=int, default=1200)
-    p.add_argument("--check_every", type=int, default=4)
-    p.add_argument("--confidence_scale", type=float, default=0.15)
-    p.add_argument("--stop_active_features", type=int, default=3)
-    p.add_argument("--min_batches_before_stop", type=int, default=2)
-    p.add_argument("--consume_all_data", action="store_true")
-    p.add_argument("--feature_var_threshold", type=float, default=0.0)
+    p.add_argument("--num_bins", type=int, default=48, help="Uniform histogram bins per feature.")
+    p.add_argument(
+        "--batch_size",
+        type=int,
+        default=512,
+        help="MAB batch size used while evaluating candidate features.",
+    )
+    p.add_argument(
+        "--mab_min_samples",
+        type=int,
+        default=1200,
+        help="Minimum node samples before MAB early-stopping can trigger.",
+    )
+    p.add_argument(
+        "--check_every",
+        type=int,
+        default=4,
+        help="MAB check interval in batches.",
+    )
+    p.add_argument(
+        "--confidence_scale",
+        type=float,
+        default=0.15,
+        help="Confidence multiplier for MAB elimination bounds.",
+    )
+    p.add_argument(
+        "--stop_active_features",
+        type=int,
+        default=3,
+        help="Stop when active candidate features fall to this count.",
+    )
+    p.add_argument(
+        "--min_batches_before_stop",
+        type=int,
+        default=2,
+        help="Minimum processed batches before allowing early stop.",
+    )
+    p.add_argument(
+        "--consume_all_data",
+        action="store_true",
+        help="Disable early stop and evaluate all node data for MAB.",
+    )
+    p.add_argument(
+        "--feature_var_threshold",
+        type=float,
+        default=0.0,
+        help="Drop features with variance at or below this threshold.",
+    )
 
     p.add_argument("--runs", type=int, default=1, help="Number of seeds per dataset.")
-    p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--seed_stride", type=int, default=1)
+    p.add_argument("--seed", type=int, default=0, help="Base random seed.")
+    p.add_argument("--seed_stride", type=int, default=1, help="Delta between run seeds.")
 
-    p.add_argument("--results_csv", type=str, default="result.csv")
-    p.add_argument("--append_results", action="store_true")
+    p.add_argument("--results_csv", type=str, default="result.csv", help="Path to summary CSV output.")
+    p.add_argument(
+        "--append_results",
+        action="store_true",
+        help="Append rows to an existing CSV instead of overwriting.",
+    )
     return p.parse_args()
 
 
 def parse_dataset_list(args: argparse.Namespace) -> list[str]:
+    """Expand `--dataset/--datasets` into an ordered validated dataset list."""
     if not args.datasets.strip():
         return [args.dataset]
     valid = set(AVAILABLE_DATASETS)
@@ -148,6 +241,7 @@ def parse_dataset_list(args: argparse.Namespace) -> list[str]:
 
 
 def parse_dataset_specs(specs: str) -> list[tuple[str, int, int, Optional[str]]]:
+    """Parse `dataset:n_train:n_test[:profile]` spec strings."""
     valid = set(AVAILABLE_DATASETS)
     out: list[tuple[str, int, int, Optional[str]]] = []
     for raw in specs.split(";"):
@@ -172,6 +266,7 @@ def parse_dataset_specs(specs: str) -> list[tuple[str, int, int, Optional[str]]]
 
 
 def dataset_group_specs(group: str) -> list[tuple[str, int, int, Optional[str]]]:
+    """Return built-in dataset-size presets for grouped benchmark runs."""
     small = [
         ("iris", 120, 30, "quick"),
         ("wine", 130, 48, "quick"),
@@ -201,6 +296,7 @@ def dataset_group_specs(group: str) -> list[tuple[str, int, int, Optional[str]]]
 
 
 def build_dataset_plan(args: argparse.Namespace) -> list[tuple[str, int, int, Optional[str]]]:
+    """Resolve the final dataset execution plan from mutually exclusive inputs."""
     if args.dataset_specs.strip():
         return parse_dataset_specs(args.dataset_specs)
     if args.dataset_group != "none":
@@ -209,6 +305,7 @@ def build_dataset_plan(args: argparse.Namespace) -> list[tuple[str, int, int, Op
 
 
 def resolve_max_features(spec: str, dataset_name: str) -> str | int:
+    """Normalize `--max_features` into a concrete tree configuration value."""
     s = spec.strip().lower()
     if s == "auto":
         return (
@@ -224,6 +321,7 @@ def resolve_max_features(spec: str, dataset_name: str) -> str | int:
 
 
 def apply_profile(args: argparse.Namespace, dataset_name: str) -> None:
+    """Apply profile presets in-place for the selected dataset."""
     if args.quick:
         args.profile = "quick"
     if args.profile == "custom":
@@ -366,6 +464,7 @@ def apply_profile(args: argparse.Namespace, dataset_name: str) -> None:
 
 
 def make_group_key(row: dict[str, object]) -> tuple[object, ...]:
+    """Build grouping key used for multi-run aggregation rows."""
     fields = (
         "dataset_requested",
         "dataset",
@@ -389,6 +488,7 @@ def benchmark_model(
     Xb_te: np.ndarray,
     y_te: np.ndarray,
 ) -> dict[str, float]:
+    """Fit one model, report timing/insertions/accuracy, and return metrics."""
     t0 = time.perf_counter()
     model.fit(Xb_tr, y_tr)
     train_time = time.perf_counter() - t0
@@ -408,6 +508,7 @@ def benchmark_model(
 
 
 def mean_std(vals: list[float]) -> tuple[float, float]:
+    """Return population mean/std, with stable behavior for 0 or 1 values."""
     if not vals:
         return float("nan"), float("nan")
     if len(vals) == 1:
@@ -416,6 +517,7 @@ def mean_std(vals: list[float]) -> tuple[float, float]:
 
 
 def write_rows_csv(path: str, rows: list[dict[str, object]], append: bool) -> None:
+    """Write summary rows to CSV and create parent directories when needed."""
     if not rows:
         return
     parent = os.path.dirname(path)
@@ -436,6 +538,7 @@ def write_rows_csv(path: str, rows: list[dict[str, object]], append: bool) -> No
 
 
 def main() -> None:
+    """Execute configured benchmark plan and write aggregated summary rows."""
     args = parse_args()
     if args.runs < 1:
         raise ValueError("--runs must be >= 1")

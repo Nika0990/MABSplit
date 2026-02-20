@@ -15,6 +15,7 @@ AVAILABLE_DATASETS = (
     "wine",
     "breast_cancer",
     "covtype",
+    "aps_failure",
     "kddcup99_10p",
     "kddcup99_full",
 )
@@ -112,6 +113,71 @@ def _mixed_to_float_codes(X: np.ndarray) -> np.ndarray:
     return out
 
 
+def _coerce_to_float32_with_nan(X: np.ndarray) -> np.ndarray:
+    """
+    Convert a dense matrix to float32 and preserve missing markers as NaN.
+
+    This is used for OpenML-style tabular data where values may be strings
+    (for example "na") even when the feature is conceptually numeric.
+    """
+    X = np.asarray(X)
+    if X.dtype != object:
+        return X.astype(np.float32, copy=False)
+
+    out = np.empty(X.shape, dtype=np.float32)
+    missing_tokens = {"", "na", "n/a", "nan", "none", "null", "?"}
+    for j in range(X.shape[1]):
+        col = X[:, j]
+        dst = np.empty(col.shape[0], dtype=np.float32)
+        cat_to_code: dict[str, float] = {}
+        next_code = 0.0
+        for i, v in enumerate(col):
+            if v is None:
+                dst[i] = np.nan
+                continue
+
+            if isinstance(v, bytes):
+                v = v.decode("utf-8", errors="ignore")
+
+            if isinstance(v, (int, float, np.integer, np.floating)):
+                dst[i] = float(v)
+                continue
+
+            text = str(v).strip()
+            if text.lower() in missing_tokens:
+                dst[i] = np.nan
+                continue
+
+            try:
+                dst[i] = float(text)
+            except ValueError:
+                # Fallback for true categorical columns.
+                if text not in cat_to_code:
+                    cat_to_code[text] = next_code
+                    next_code += 1.0
+                dst[i] = cat_to_code[text]
+        out[:, j] = dst
+    return out
+
+
+def _impute_nan_with_column_median(X: np.ndarray) -> np.ndarray:
+    """Replace NaN feature values with per-column medians (or 0.0 if empty)."""
+    X = np.asarray(X, dtype=np.float32)
+    if not np.isnan(X).any():
+        return X
+
+    out = X.copy()
+    for j in range(out.shape[1]):
+        col = out[:, j]
+        miss = np.isnan(col)
+        if not np.any(miss):
+            continue
+        valid = col[~miss]
+        fill = float(np.median(valid)) if valid.size > 0 else 0.0
+        col[miss] = fill
+    return out
+
+
 def load_mnist(data_dir: str, n_train: int, n_test: int, seed: int):
     ensure_mnist(data_dir)
     Xtr = _read_idx_images(os.path.join(data_dir, MNIST_FILES["train_images"]))
@@ -134,7 +200,7 @@ def load_sklearn_dataset(
         from sklearn.model_selection import train_test_split  # type: ignore
     except ImportError as exc:
         raise RuntimeError(
-            "scikit-learn is required for datasets: digits/iris/wine/breast_cancer/covtype/kddcup99"
+            "scikit-learn is required for datasets: digits/iris/wine/breast_cancer/covtype/aps_failure/kddcup99"
         ) from exc
 
     if name == "digits":
@@ -161,6 +227,25 @@ def load_sklearn_dataset(
             return X[tr_idx], y[tr_idx], X[te_idx], y[te_idx]
 
         # Fallback split if explicit sizes are not feasible.
+        Xtr, Xte, ytr, yte = train_test_split(
+            X, y, test_size=0.2, random_state=seed, stratify=y
+        )
+        Xtr, ytr = _subsample_xy(Xtr, ytr, n_train, rng)
+        Xte, yte = _subsample_xy(Xte, yte, n_test, rng)
+        return Xtr, ytr, Xte, yte
+    elif name == "aps_failure":
+        # OpenML dataset "APSFailure" (data_id=41138), used in MABSplit paper.
+        data = sk_datasets.fetch_openml(data_id=41138, as_frame=False, parser="auto")
+        X = _coerce_to_float32_with_nan(data.data)
+        X = _impute_nan_with_column_median(X)
+        y = _encode_labels(data.target)
+        n = X.shape[0]
+        rng = np.random.default_rng(seed)
+        if n_train > 0 and n_test > 0 and (n_train + n_test) <= n:
+            perm = rng.permutation(n)
+            tr_idx = perm[:n_train]
+            te_idx = perm[n_train : n_train + n_test]
+            return X[tr_idx], y[tr_idx], X[te_idx], y[te_idx]
         Xtr, Xte, ytr, yte = train_test_split(
             X, y, test_size=0.2, random_state=seed, stratify=y
         )
