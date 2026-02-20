@@ -174,19 +174,24 @@ class MABSplitHistogramSplitter(SplitterBase):
     ):
         n = Xb_node.shape[0]
         m = feature_indices.shape[0]
-        if n < 2 or m == 0:
+        B = self.n_bins
+        if n < 2 or m == 0 or B < 2:
             return None
         if n < self.mab_min_samples:
             return self._exact_fallback(
                 Xb_node, y_node, feature_indices, n_classes, parent_impurity, min_impurity_decrease
             )
 
-        B = self.n_bins
-        active_idx = np.arange(m, dtype=np.int64)
+        # Full MABSplit candidate set: each (feature, threshold) pair is one arm.
+        edges_per_feature = B - 1
+        active_feat_idx = np.repeat(np.arange(m, dtype=np.int64), edges_per_feature)
+        active_edge_idx = np.tile(np.arange(edges_per_feature, dtype=np.int64), m)
         counts = np.zeros((m, B, n_classes), dtype=np.int32)
-        delta = 1.0 / (max(n, 2) * max(m, 1))
+        n_arms = int(active_feat_idx.size)
+        delta = 1.0 / (max(n, 2) * max(n_arms, 1))
         delta = max(delta, 1e-12)
-        # Fix the candidate feature view once; only active feature columns are sliced per batch.
+        # Fix the candidate feature view once; per batch we only update features
+        # that still have at least one active arm.
         X_node_features = Xb_node[:, feature_indices]
 
         perm = rng.permutation(n)
@@ -195,27 +200,38 @@ class MABSplitHistogramSplitter(SplitterBase):
         steps_since_check = 0
         stop_after = self.min_batches_before_stop * self.batch_size
 
-        def best_per_feature(feat_idx: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-            # Work only on active features to reduce overhead.
-            c = counts[feat_idx]
+        def evaluate_active_arms(
+            feat_idx: np.ndarray, edge_idx: np.ndarray
+        ) -> np.ndarray:
+            """Return impurity estimate for each active (feature, threshold) arm."""
+            if feat_idx.size == 0:
+                return np.zeros(0, dtype=np.float64)
+
+            uniq_feat, inv = np.unique(feat_idx, return_inverse=True)
+            c = counts[uniq_feat]
             cum = np.cumsum(c, axis=1)
             total = cum[:, -1, :]
-            n_total = total.sum(axis=1).astype(np.float64)
-            left = cum[:, :-1, :]
-            right = total[:, None, :] - left
-            nL = left.sum(axis=2).astype(np.float64)
-            nR = n_total[:, None] - nL
+
+            left = cum[inv, edge_idx, :]
+            right = total[inv] - left
+
+            nL = left.sum(axis=1).astype(np.float64)
+            nR = right.sum(axis=1).astype(np.float64)
+            n_total = nL + nR
+
             gL = gini_from_counts(left)
             gR = gini_from_counts(right)
-            denom = np.maximum(1.0, n_total)[:, None]
+            denom = np.maximum(1.0, n_total)
             mu = (nL / denom) * gL + (nR / denom) * gR
             mu[(nL <= 0) | (nR <= 0)] = np.inf
-            best_edge = np.argmin(mu, axis=1)
-            best_mu = mu[np.arange(mu.shape[0]), best_edge]
-            return best_mu, best_edge
+            return mu
 
-        while ptr < n and active_idx.size > 0:
-            if active_idx.size <= 1:
+        # Keep stopping behavior close to previous semantics: `stop_active_features`
+        # means "roughly this many features worth of surviving arms".
+        stop_active_arms = max(1, self.stop_active_features) * edges_per_feature
+
+        while ptr < n and active_feat_idx.size > 0:
+            if active_feat_idx.size <= 1:
                 break
 
             batch_n = min(self.batch_size, n - ptr)
@@ -225,53 +241,60 @@ class MABSplitHistogramSplitter(SplitterBase):
             steps_since_check += 1
 
             yb = y_node[idx]
-            Xb_batch = X_node_features[idx][:, active_idx]
+            active_features = np.unique(active_feat_idx)
+            Xb_batch = X_node_features[idx][:, active_features]
             c = hist3d_counts_for_features(Xb_batch, yb, B, n_classes)
-            counts[active_idx] += c.astype(np.int32, copy=False)
-            self.insertions_ += batch_n * active_idx.size
+            counts[active_features] += c.astype(np.int32, copy=False)
+            self.insertions_ += batch_n * active_features.size
 
             if steps_since_check < self.check_every:
                 continue
             steps_since_check = 0
 
-            mu_feat, _ = best_per_feature(active_idx)
+            mu_arm = evaluate_active_arms(active_feat_idx, active_edge_idx)
             rad = self.confidence_scale * hoeffding_radius(delta, n_used)
-            ucb = mu_feat + rad
-            best_ucb = float(np.min(ucb))
+            ucb = mu_arm + rad
+            finite = np.isfinite(ucb)
+            if not np.any(finite):
+                continue
+            best_ucb = float(np.min(ucb[finite]))
             if not np.isfinite(best_ucb):
                 continue
 
-            lcb = mu_feat - rad
+            lcb = mu_arm - rad
             eliminate = lcb > best_ucb
             if eliminate.any():
                 keep = ~eliminate
                 if not np.any(keep):
-                    keep[int(np.argmin(mu_feat))] = True
-                active_idx = active_idx[keep]
+                    keep[int(np.argmin(mu_arm))] = True
+                active_feat_idx = active_feat_idx[keep]
+                active_edge_idx = active_edge_idx[keep]
 
-            # Paper-style early stopping: once only a few contenders remain, stop querying.
-            if active_idx.size <= self.stop_active_features and n_used >= stop_after:
+            # Paper-style early stopping: once only a few candidate arms remain, stop querying.
+            if active_feat_idx.size <= stop_active_arms and n_used >= stop_after:
                 break
 
-        if self.consume_all_data and ptr < n and active_idx.size > 0:
+        if self.consume_all_data and ptr < n and active_feat_idx.size > 0:
             idx = perm[ptr:]
             yb = y_node[idx]
-            Xb_batch = X_node_features[idx][:, active_idx]
+            active_features = np.unique(active_feat_idx)
+            Xb_batch = X_node_features[idx][:, active_features]
             c = hist3d_counts_for_features(Xb_batch, yb, B, n_classes)
-            counts[active_idx] += c.astype(np.int32, copy=False)
-            self.insertions_ += idx.size * active_idx.size
+            counts[active_features] += c.astype(np.int32, copy=False)
+            self.insertions_ += idx.size * active_features.size
 
-        if active_idx.size == 0:
+        if active_feat_idx.size == 0:
             return None
 
-        mu_active, edge_active = best_per_feature(active_idx)
-        i_best_local = int(np.argmin(mu_active))
-        if not np.isfinite(mu_active[i_best_local]):
+        mu_active = evaluate_active_arms(active_feat_idx, active_edge_idx)
+        finite = np.isfinite(mu_active)
+        if not np.any(finite):
             return None
+        i_best_local = int(np.argmin(np.where(finite, mu_active, np.inf)))
 
-        best_global_idx = int(active_idx[i_best_local])
+        best_global_idx = int(active_feat_idx[i_best_local])
         best_f = int(feature_indices[best_global_idx])
-        best_edge = int(edge_active[i_best_local])
+        best_edge = int(active_edge_idx[i_best_local])
         gain = parent_impurity - float(mu_active[i_best_local])
         if gain < min_impurity_decrease:
             return None

@@ -189,7 +189,10 @@ def parse_args() -> argparse.Namespace:
         "--stop_active_features",
         type=int,
         default=3,
-        help="Stop when active candidate features fall to this count.",
+        help=(
+            "Early-stop target in feature-units; internally this is multiplied by "
+            "(num_bins-1) to get a stop threshold on active (feature, threshold) arms."
+        ),
     )
     p.add_argument(
         "--min_batches_before_stop",

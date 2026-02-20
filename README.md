@@ -130,5 +130,6 @@ python3 minimal_fastforest_rf.py --dataset aps_failure --profile quick --mode bo
 ## Reproducibility notes
 
 - Exact and MAB use identical data/model settings; only split strategy differs.
+- MAB treats each `(feature, threshold)` candidate as an arm during elimination.
 - `time_speedup_exact_over_mab > 1` means MAB is faster.
 - Add `--consume_all_data` to disable MAB early stopping.
